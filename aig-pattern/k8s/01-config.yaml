@@ -1,0 +1,27 @@
+# Несекретные параметры паттерна (обоснование значений — в разделе 3.1 работы)
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: aig-config, namespace: aig}
+data:
+  S3_ENDPOINT: http://storage:9000
+  RAW_BUCKET: raw
+  CANONICAL_BUCKET: canonical
+  QUARANTINE_BUCKET: quarantine
+  SECURITY_URL: http://security-service:8002
+  DETECTOR_URL: http://format-detector:8003
+  REGISTRY_URL: http://schema-registry:8004
+  ADAPTER_URL: http://adapter-factory:8005
+  QUARANTINE_URL: http://quarantine-notifier:8006
+  HEAD_BYTES: "65536"
+  MAX_OBJECT_BYTES: "67108864"
+  QUOTA_RATE_PER_MIN: "10"
+  QUOTA_BURST: "31"
+  MAX_ZIP_RATIO: "100"
+  MPU_MAX_AGE_S: "600"
+  MPU_MAX_OPEN: "3"
+  STRIKES_TO_BLOCK: "3"
+  BLOCK_TTL_S: "3600"
+  REAP_PERIOD_S: "60"
+  SAMPLE_ROWS: "100"
+  MAX_BAD_RATIO: "0.01"
+  SLA_HOURS: "24"

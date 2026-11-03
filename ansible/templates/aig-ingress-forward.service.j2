@@ -1,0 +1,14 @@
+# Публикация Ingress-контроллера minikube на сетевом интерфейсе ВМ3 (порт 443)
+[Unit]
+Description=AIG: port-forward ingress-nginx 443 -> {{ ansible_host }}:443
+After=network-online.target docker.service
+
+[Service]
+Environment=KUBECONFIG=/home/{{ aig_user }}/.kube/config
+ExecStart=/usr/local/bin/kubectl -n ingress-nginx port-forward --address 0.0.0.0 \
+    svc/ingress-nginx-controller 443:443
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,114 @@
+# gateway — единственная точка входа (nginx от непривилегированного пользователя)
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: gateway-nginx, namespace: aig}
+data:
+  nginx.conf: |
+    # gateway — единственная точка входа паттерна AIG (nginx-unprivileged, порт 8080)
+    pid /tmp/nginx.pid;
+    worker_processes auto;
+    events { worker_connections 1024; }
+
+    http {
+        client_body_temp_path /tmp/client_body;
+        proxy_temp_path       /tmp/proxy;
+        fastcgi_temp_path     /tmp/fastcgi;
+        uwsgi_temp_path       /tmp/uwsgi;
+        scgi_temp_path        /tmp/scgi;
+        server_tokens off;
+        log_format json escape=json
+            '{"ts":"$time_iso8601","service":"gateway","ip":"$remote_addr",'
+            '"method":"$request_method","uri":"$uri","status":$status,'
+            '"bytes":$request_length,"rt":$request_time}';
+
+        access_log /dev/stdout json;
+
+        # внешний эшелон ограничения частоты: по IP и по токену (JWT-субъекту)
+        limit_req_zone $binary_remote_addr  zone=per_ip:10m    rate=5r/s;
+        limit_req_zone $http_authorization  zone=per_token:10m rate=2r/s;
+        limit_req_status 429;
+        client_max_body_size 64m;              # = MAX_OBJECT_BYTES security-service
+
+        upstream ingest_api { server ingest-api:8001; }
+
+        server {
+            listen 8080;
+            location ~ ^/(ingest|ingest-mpu|tickets)/ {
+                limit_req zone=per_ip    burst=20 nodelay;
+                limit_req zone=per_token burst=31 nodelay;
+                proxy_pass http://ingest_api;
+                proxy_set_header Host $host;
+                proxy_set_header X-Request-ID $request_id;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_read_timeout 120s;
+            }
+            location = /healthz { access_log off; return 200 "ok\n"; }
+            # прямой доступ к S3 API и сервисам закрыт
+            location / { return 404; }
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: gateway, namespace: aig, labels: {app: gateway}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: gateway}}
+  template:
+    metadata: {labels: {app: gateway, tier: edge}}
+    spec:
+      serviceAccountName: aig-gateway-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: nginx
+        image: nginxinc/nginx-unprivileged:1.27-alpine
+        ports: [{containerPort: 8080, name: http}]
+        readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+        livenessProbe:
+          httpGet: {path: /healthz, port: http}
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 250m, memory: 128Mi}
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                          capabilities: {drop: [ALL]}}
+        volumeMounts:
+        - name: conf
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+          readOnly: true
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - {name: conf, configMap: {name: gateway-nginx}}
+      - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: gateway, namespace: aig}
+spec:
+  selector: {app: gateway}
+  ports: [{name: http, port: 8080, targetPort: http}]
+---
+# Ingress: терминация TLS (секрет aig-tls) на контроллере ingress-nginx
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aig
+  namespace: aig
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls: [{hosts: [aig.local], secretName: aig-tls}]
+  rules:
+  - host: aig.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend: {service: {name: gateway, port: {number: 8080}}}

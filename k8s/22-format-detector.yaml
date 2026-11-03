@@ -1,0 +1,61 @@
+# format-detector — идентификация формата, без состояния и без доступа к ХБД
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: format-detector, namespace: aig, labels: {app: format-detector}}
+spec:
+  replicas: 2
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector: {matchLabels: {app: format-detector}}
+  template:
+    metadata:
+      labels: {app: format-detector, tier: app}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8003"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: aig-detector-sa
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001,
+                        seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: format-detector
+        image: aig/detector:1.0
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 8003, name: http}]
+        envFrom: [{configMapRef: {name: aig-config}}]
+        env:
+        - {name: PORT, value: "8003"}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /health, port: http}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 250m, memory: 128Mi}
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                          capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: format-detector, namespace: aig}
+spec:
+  selector: {app: format-detector}
+  ports: [{name: http, port: 8003, targetPort: http}]
+---
+# HPA: 2–6 реплик, цель — 70 % загрузки CPU от запроса (нужен metrics-server)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: format-detector, namespace: aig}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: format-detector}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}

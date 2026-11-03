@@ -1,0 +1,19 @@
+# Общие параметры развертывания паттерна AIG
+aig_user: aig
+aig_dir: /opt/aig-pattern
+aig_client_dir: /opt/aig-client
+aig_host: aig.local
+minikube_version: v1.34.0
+kubectl_version: v1.31.0
+# ресурсы кластера, под которые рассчитана ResourceQuota (раздел 3.2)
+minikube_cpus: 4
+minikube_memory: 6144       # МиБ; ВМ3 должна иметь не менее 8 ГиБ ОЗУ
+aig_images:
+  ingest-api: aig/ingest:1.0
+  security-service: aig/security:1.0
+  format-detector: aig/detector:1.0
+  schema-registry: aig/registry:1.0
+  adapter-factory: aig/adapter:1.0
+  quarantine-notifier: aig/quarantine:1.0
+  minio-init: aig/minio-init:1.0
+aig_project_parts: [services, k8s, gateway, scripts, samples]

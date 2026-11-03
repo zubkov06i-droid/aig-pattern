@@ -1,0 +1,36 @@
+# Конвейер GitLab CI: тесты -> сборка образов -> проверка манифестов -> развёртывание
+stages: [test, build, validate, deploy]
+
+unit-tests:
+  stage: test
+  image: python:3.12-slim
+  script:
+    - pip install -r requirements-dev.txt
+    - pytest -q tests
+
+build-images:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  parallel:
+    matrix:
+      - SERVICE: [ingest-api, security-service, format-detector, schema-registry,
+                  adapter-factory, quarantine-notifier, minio-init]
+  script:
+    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
+    - docker build --build-arg SERVICE=$SERVICE -t "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHORT_SHA" services
+    - docker push "$CI_REGISTRY_IMAGE/$SERVICE:$CI_COMMIT_SHORT_SHA"
+
+validate-manifests:
+  stage: validate
+  image: {name: ghcr.io/yannh/kubeconform:v0.6.7-alpine, entrypoint: [""]}
+  script:
+    - /kubeconform -summary -strict -ignore-filename-pattern kustomization k8s/
+
+deploy:
+  stage: deploy
+  image: {name: alpine/k8s:1.31.4, entrypoint: [""]}
+  when: manual                       # развёртывание на стенд — по кнопке
+  script:
+    - kubectl apply -k k8s
+    - kubectl -n aig rollout status deployment/ingest-api --timeout=300s

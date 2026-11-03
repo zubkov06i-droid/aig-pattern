@@ -1,0 +1,165 @@
+# Сетевая сегментация namespace aig: «запрещено всё, что не разрешено явно».
+# Требует CNI с поддержкой NetworkPolicy (Calico: minikube start --cni=calico).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny-all, namespace: aig}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+# DNS разрешён всем подам (иначе не работают имена сервисов)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-dns, namespace: aig}
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+  - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}}]
+    ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+---
+# Сбор метрик Prometheus из namespace мониторинга (глава 4)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: allow-monitoring-scrape, namespace: aig}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: aig-monitoring}
+---
+# gateway: вход только от ingress-nginx, выход только к ingest-api
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: gateway, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: gateway}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+    ports: [{port: 8080}]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: ingest-api}}}]
+    ports: [{port: 8001}]
+---
+# ingest-api: вход от gateway; выход к сервисам паттерна и S3 API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: ingest-api, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: ingest-api}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: gateway}}}]
+    ports: [{port: 8001}]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: security-service}}}]
+    ports: [{port: 8002}]
+  - to: [{podSelector: {matchLabels: {app: format-detector}}}]
+    ports: [{port: 8003}]
+  - to: [{podSelector: {matchLabels: {app: adapter-factory}}}]
+    ports: [{port: 8005}]
+  - to: [{podSelector: {matchLabels: {app: quarantine-notifier}}}]
+    ports: [{port: 8006}]
+  - to: [{podSelector: {matchLabels: {app: storage}}}]
+    ports: [{port: 9000}]
+---
+# security-service: вход от ingest-api; выход только к S3 API (Abort/ListMultipart)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: security-service, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: security-service}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: ingest-api}}}]
+    ports: [{port: 8002}]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: storage}}}]
+    ports: [{port: 9000}]
+---
+# format-detector: вход от ingest-api; исходящих соединений нет вообще
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: format-detector, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: format-detector}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: ingest-api}}}]
+    ports: [{port: 8003}]
+---
+# schema-registry: вход только от adapter-factory; исходящих соединений нет
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: schema-registry, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: schema-registry}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: adapter-factory}}}]
+    ports: [{port: 8004}]
+---
+# adapter-factory: вход от ingest-api; выход к реестру схем и S3 API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: adapter-factory, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: adapter-factory}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: ingest-api}}}]
+    ports: [{port: 8005}]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: schema-registry}}}]
+    ports: [{port: 8004}]
+  - to: [{podSelector: {matchLabels: {app: storage}}}]
+    ports: [{port: 9000}]
+---
+# quarantine-notifier: вход от ingest-api; выход к S3 API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: quarantine-notifier, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: quarantine-notifier}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app: ingest-api}}}]
+    ports: [{port: 8006}]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: storage}}}]
+    ports: [{port: 9000}]
+---
+# storage (MinIO): S3 API только для четырёх сервисов и Job инициализации;
+# консоль 9001 — только для пода администратора (метка role=admin)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: storage, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: storage}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+  - from:
+    - podSelector: {matchLabels: {app: ingest-api}}
+    - podSelector: {matchLabels: {app: security-service}}
+    - podSelector: {matchLabels: {app: adapter-factory}}
+    - podSelector: {matchLabels: {app: quarantine-notifier}}
+    - podSelector: {matchLabels: {app: minio-init}}
+    ports: [{port: 9000}]
+  - from: [{podSelector: {matchLabels: {role: admin}}}]
+    ports: [{port: 9001}]
+---
+# minio-init: выход только к S3 API
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: minio-init, namespace: aig}
+spec:
+  podSelector: {matchLabels: {app: minio-init}}
+  policyTypes: [Egress]
+  egress:
+  - to: [{podSelector: {matchLabels: {app: storage}}}]
+    ports: [{port: 9000}]

@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.db
+.pytest_cache/
+tls/
+.local/
+ansible/group_vars/aig_cluster/vault.yml
+.venv/

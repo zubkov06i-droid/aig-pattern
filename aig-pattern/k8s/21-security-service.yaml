@@ -1,0 +1,58 @@
+# security-service — микросервис безопасности:
+# JWT, квоты, санитизация, контроль multipart-сессий
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: security-service, namespace: aig, labels: {app: security-service}}
+spec:
+  replicas: 1
+  serviceName: security-service
+  selector: {matchLabels: {app: security-service}}
+  template:
+    metadata:
+      labels: {app: security-service, tier: app}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8002"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: aig-security-sa
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001,
+                        seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: security-service
+        image: aig/security:1.0
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 8002, name: http}]
+        envFrom: [{configMapRef: {name: aig-config}}]
+        env:
+        - {name: PORT, value: "8002"}
+        - name: JWT_SECRET
+          valueFrom: {secretKeyRef: {name: aig-secrets, key: JWT_SECRET}}
+        - {name: S3_ACCESS_KEY, value: aig-security-sa}
+        - name: S3_SECRET_KEY
+          valueFrom: {secretKeyRef: {name: aig-secrets, key: AIG_SECURITY_SA_SECRET}}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /health, port: http}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                          capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: tmp, mountPath: /tmp}, {name: data, mountPath: /data}]
+      volumes: [{name: tmp, emptyDir: {}}]
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: security-service, namespace: aig}
+spec:
+  selector: {app: security-service}
+  ports: [{name: http, port: 8002, targetPort: http}]

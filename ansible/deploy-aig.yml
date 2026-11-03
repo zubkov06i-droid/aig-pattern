@@ -1,0 +1,191 @@
+# Плейбук развертывания паттерна AIG на стенде из трёх ВМ.
+#   ansible-playbook -i inventory.ini deploy-aig.yml --ask-vault-pass
+---
+- name: ВМ3 — кластер Kubernetes (minikube) и микросервисы паттерна AIG
+  hosts: aig_cluster
+  become: true
+  tasks:
+    - name: Установить Docker и служебные пакеты
+      ansible.builtin.apt:
+        name: [docker.io, git, curl, conntrack, openssl, acl, python3]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Добавить пользователя в группу docker
+      ansible.builtin.user:
+        name: "{{ aig_user }}"
+        groups: docker
+        append: true
+
+    - name: Сбросить соединение, чтобы применилась группа docker
+      ansible.builtin.meta: reset_connection
+
+    - name: Установить minikube и kubectl фиксированных версий
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "/usr/local/bin/{{ item.name }}"
+        mode: "0755"
+      loop:
+        - name: minikube
+          url: "https://storage.googleapis.com/minikube/releases/\
+            {{ minikube_version }}/minikube-linux-amd64"
+        - name: kubectl
+          url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+
+    - name: Создать каталог проекта
+      ansible.builtin.file:
+        path: "{{ aig_dir }}"
+        state: directory
+        owner: "{{ aig_user }}"
+        mode: "0750"
+
+    - name: Скопировать исходный код, манифесты и сценарии
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../{{ item }}"
+        dest: "{{ aig_dir }}/"
+        owner: "{{ aig_user }}"
+        mode: preserve
+      loop: "{{ aig_project_parts }}"
+
+    - name: Сформировать файл секретов .env из ansible-vault
+      ansible.builtin.template:
+        src: aig.env.j2
+        dest: "{{ aig_dir }}/.env"
+        owner: "{{ aig_user }}"
+        mode: "0600"
+      no_log: true
+
+    - name: Запустить кластер minikube (CNI Calico для NetworkPolicy)
+      become_user: "{{ aig_user }}"
+      ansible.builtin.shell: |
+        minikube status >/dev/null 2>&1 && echo running && exit 0
+        minikube start --driver=docker --cni=calico \
+          --cpus={{ minikube_cpus }} --memory={{ minikube_memory }}
+      register: mk_start
+      changed_when: "'running' not in mk_start.stdout"
+
+    - name: Включить дополнения ingress и metrics-server
+      become_user: "{{ aig_user }}"
+      ansible.builtin.command: "minikube addons enable {{ item }}"
+      loop: [ingress, metrics-server]
+      changed_when: false
+
+    - name: Собрать образы микросервисов внутри minikube
+      become_user: "{{ aig_user }}"
+      ansible.builtin.shell: |
+        eval "$(minikube -p minikube docker-env)"
+        docker build -q --build-arg SERVICE={{ item.key }} \
+          -t {{ item.value }} {{ aig_dir }}/services
+      loop: "{{ aig_images | dict2items }}"
+      changed_when: true
+
+    - name: Создать пространство имён, секреты и TLS-сертификат
+      become_user: "{{ aig_user }}"
+      ansible.builtin.shell: |
+        set -e
+        cd {{ aig_dir }}
+        kubectl apply -f k8s/00-namespace.yaml
+        kubectl -n aig create secret generic aig-secrets --from-env-file=.env \
+          --dry-run=client -o yaml | kubectl apply -f -
+        mkdir -p tls
+        [ -f tls/tls.crt ] || openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+          -subj "/CN={{ aig_host }}" -addext "subjectAltName=DNS:{{ aig_host }}" \
+          -keyout tls/tls.key -out tls/tls.crt
+        kubectl -n aig create secret tls aig-tls --cert=tls/tls.crt --key=tls/tls.key \
+          --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      no_log: true
+      changed_when: true
+
+    - name: Применить манифесты паттерна (kustomize)
+      become_user: "{{ aig_user }}"
+      ansible.builtin.command: "kubectl apply -k {{ aig_dir }}/k8s"
+      register: apply_out
+      changed_when: "'configured' in apply_out.stdout or 'created' in apply_out.stdout"
+
+    - name: Дождаться инициализации ХБД и готовности ingest-api
+      become_user: "{{ aig_user }}"
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - kubectl -n aig wait --for=condition=complete job/minio-init --timeout=300s
+        - kubectl -n aig rollout status deployment/ingest-api --timeout=300s
+        - >-
+          kubectl -n ingress-nginx rollout status
+          deployment/ingress-nginx-controller --timeout=300s
+      changed_when: false
+
+    - name: Опубликовать Ingress на интерфейсе ВМ3 (systemd-служба)
+      ansible.builtin.template:
+        src: aig-ingress-forward.service.j2
+        dest: /etc/systemd/system/aig-ingress-forward.service
+        mode: "0644"
+      notify: Перезапустить port-forward
+
+    - name: Включить службу port-forward
+      ansible.builtin.systemd:
+        name: aig-ingress-forward
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Вывести список развёрнутых подов
+      become_user: "{{ aig_user }}"
+      ansible.builtin.command: kubectl -n aig get pods -o wide
+      register: pods
+      changed_when: false
+
+    - name: Показать результат
+      ansible.builtin.debug:
+        var: pods.stdout_lines
+
+  handlers:
+    - name: Перезапустить port-forward
+      ansible.builtin.systemd:
+        name: aig-ingress-forward
+        state: restarted
+        daemon_reload: true
+
+- name: ВМ1 и ВМ2 — клиенты (легальный пользователь и нарушитель)
+  hosts: aig_clients
+  become: true
+  vars:
+    cluster_ip: "{{ hostvars[groups['aig_cluster'][0]]['ansible_host'] }}"
+  tasks:
+    - name: Установить Python и venv
+      ansible.builtin.apt:
+        name: [python3, python3-venv]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Разрешить имя {{ aig_host }} в адрес ВМ3
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '\s{{ aig_host }}$'
+        line: "{{ cluster_ip }} {{ aig_host }}"
+
+    - name: Скопировать клиентские сценарии и тестовые поставки
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../{{ item }}"
+        dest: "{{ aig_client_dir }}/"
+        owner: "{{ aig_user }}"
+        mode: preserve
+      loop: [scripts, samples]
+
+    - name: Установить зависимости клиента в виртуальное окружение
+      ansible.builtin.pip:
+        name: [httpx==0.28.1, pyjwt==2.10.1]
+        virtualenv: "{{ aig_client_dir }}/.venv"
+        virtualenv_command: python3 -m venv
+
+    - name: Проверить доступность паттерна через Ingress
+      ansible.builtin.uri:
+        url: "https://{{ aig_host }}/healthz"
+        validate_certs: false
+        status_code: 200
+      register: health
+      retries: 10
+      delay: 6
+      until: health.status == 200

@@ -1,0 +1,115 @@
+# Локальный стенд паттерна AIG (Docker Compose).
+# Запуск:  copy .env.example .env  ->  docker compose up -d --build
+# Сегментация сетей повторяет NetworkPolicy Kubernetes:
+#   edge     — только gateway (публикуется наружу);
+#   app      — внутренняя сеть сервисов (internal: нет выхода наружу);
+#   storage  — доступ к MinIO только у ingest, security, quarantine, adapter, init.
+x-svc: &svc
+  restart: unless-stopped
+  env_file: .env
+  networks: [app]
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
+services:
+  storage:
+    image: ${MINIO_IMAGE:-docker.io/pgsty/silo:latest}
+    command: server /data --console-address ":9001"
+    env_file: .env
+    volumes: [minio-data:/data]
+    networks: [storage]
+    ports: ["127.0.0.1:9001:9001"]         # консоль MinIO — только с localhost
+    restart: unless-stopped
+
+  minio-init:
+    build: {context: ./services, args: {SERVICE: minio-init}}
+    image: aig/minio-init:1.0
+    command: ["python", "app.py"]
+    env_file: .env
+    environment: {MINIO_ENDPOINT: "storage:9000"}
+    networks: [storage]
+    depends_on: [storage]
+    restart: "no"
+
+  security-service:
+    <<: *svc
+    build: {context: ./services, args: {SERVICE: security-service}}
+    image: aig/security:1.0
+    environment:
+      PORT: "8002"
+      S3_ENDPOINT: http://storage:9000
+      S3_ACCESS_KEY: aig-security-sa
+      S3_SECRET_KEY: ${AIG_SECURITY_SA_SECRET}
+    volumes: [security-data:/data]
+    networks: [app, storage]
+
+  format-detector:
+    <<: *svc
+    build: {context: ./services, args: {SERVICE: format-detector}}
+    image: aig/detector:1.0
+    environment: {PORT: "8003"}
+
+  schema-registry:
+    <<: *svc
+    build: {context: ./services, args: {SERVICE: schema-registry}}
+    image: aig/registry:1.0
+    environment: {PORT: "8004"}
+    volumes: [registry-data:/data]
+
+  adapter-factory:
+    <<: *svc
+    build: {context: ./services, args: {SERVICE: adapter-factory}}
+    image: aig/adapter:1.0
+    environment:
+      PORT: "8005"
+      S3_ENDPOINT: http://storage:9000
+      S3_ACCESS_KEY: aig-adapter-sa
+      S3_SECRET_KEY: ${AIG_ADAPTER_SA_SECRET}
+    volumes: [adapter-data:/data]
+    networks: [app, storage]
+
+  quarantine-notifier:
+    <<: *svc
+    build: {context: ./services, args: {SERVICE: quarantine-notifier}}
+    image: aig/quarantine:1.0
+    environment:
+      PORT: "8006"
+      S3_ENDPOINT: http://storage:9000
+      S3_ACCESS_KEY: aig-quarantine-sa
+      S3_SECRET_KEY: ${AIG_QUARANTINE_SA_SECRET}
+    volumes: [quarantine-data:/data]
+    networks: [app, storage]
+
+  ingest-api:
+    <<: *svc
+    build: {context: ./services, args: {SERVICE: ingest-api}}
+    image: aig/ingest:1.0
+    environment:
+      PORT: "8001"
+      S3_ENDPOINT: http://storage:9000
+      S3_ACCESS_KEY: aig-ingest-sa
+      S3_SECRET_KEY: ${AIG_INGEST_SA_SECRET}
+    networks: [app, storage]
+    depends_on: [security-service, format-detector, adapter-factory, quarantine-notifier]
+
+  gateway:
+    image: nginxinc/nginx-unprivileged:1.27-alpine
+    volumes: ["./gateway/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["8080:8080"]
+    networks: [edge, app]
+    depends_on: [ingest-api]
+    restart: unless-stopped
+
+networks:
+  edge: {}
+  app: {internal: true}
+  storage: {internal: true}
+
+volumes:
+  minio-data: {}
+  security-data: {}
+  registry-data: {}
+  adapter-data: {}
+  quarantine-data: {}
