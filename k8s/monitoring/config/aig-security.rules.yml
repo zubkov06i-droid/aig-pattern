@@ -1,0 +1,76 @@
+# Правила записи и оповещения: метрики безопасности паттерна AIG (раздел 4.2)
+groups:
+  - name: aig-security-sli
+    rules:
+      # М1. Доля отказов в обработке среди всех исходов загрузки за 5 минут
+      - record: aig:ingest_reject_ratio:5m
+        expr: |
+          sum(increase(aig_ingest_outcomes_total{status=~"rejected|retry_later"}[5m]))
+          / clamp_min(sum(increase(aig_ingest_outcomes_total[5m])), 1)
+      # М2. Доля автоадаптации: адаптированные среди поставок неизвестного формата
+      - record: aig:adaptation_ratio:1h
+        expr: |
+          sum(increase(aig_ingest_outcomes_total{status="adapted"}[1h]))
+          / clamp_min(sum(increase(
+              aig_ingest_outcomes_total{status=~"adapted|quarantined"}[1h])), 1)
+      # М6. 95-й процентиль времени приёма поставки (ingest-api), секунды
+      - record: aig:ingest_latency_p95:5m
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(
+            aig_http_request_seconds_bucket{service="ingest-api",
+                                           path=~"/ingest.*"}[5m])))
+
+  - name: aig-security-alerts
+    rules:
+      - alert: AIGServiceDown
+        # for: 1m — 4 опроса подряд без ответа, единичный пропуск не тревожит
+        expr: up{job="aig-pods"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "Микросервис {{ $labels.app }} ({{ $labels.pod }}) не отвечает"
+      - alert: AIGIngestRejects
+        # штатно ЛП не получает отказов; любой отказ требует разбора (УБИ.105)
+        expr: |
+          sum(increase(
+            aig_ingest_outcomes_total{status=~"rejected|retry_later"}[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Отказы в обработке загрузок за 5 мин: {{ $value | humanize }}"
+      - alert: AIGMultipartFlood
+        # срабатывание лимита MPU_MAX_OPEN = 3 — признак сценария С2
+        expr: sum(increase(aig_security_rejections_total{reason="mpu_limit"}[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Превышен лимит открытых multipart-сессий (сценарий С2)"
+      - alert: AIGSubjectBlocked
+        # блокировка = STRIKES_TO_BLOCK = 3 подтверждённых нарушения одного субъекта
+        expr: increase(aig_blocked_subjects_total[5m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Заблокирован субъект-нарушитель: {{ $value | humanize }} за 5 мин"
+      - alert: AIGDanglingMultipartAborted
+        # окно 15 мин > MPU_MAX_AGE + REAP_PERIOD = 600 + 60 с: событие не теряется
+        expr: increase(aig_mpu_aborted_total[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Прерваны висячие multipart-сессии: {{ $value | humanize }}"
+      - alert: AIGActiveContent
+        # легальные поставки не содержат исполняемого и активного кода
+        expr: sum(increase(aig_security_rejections_total{reason="sanitize"}[5m])) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Отклонено опасное содержимое (санитизация)"
+      - alert: AIGQuarantineSlaOverdue
+        # нарушение SLA 24 ч — пользователь не получил ответа в обещанный срок
+        expr: max(aig_quarantine_sla_overdue) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Карантинные тикеты с нарушенным SLA: {{ $value | humanize }}"
+      - alert: AIGIngestSlow
+        # 60 с — половина proxy_read_timeout шлюза (120 с): запас до обрыва запроса
+        expr: aig:ingest_latency_p95:5m > 60
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 времени приёма поставки {{ $value | humanize }} с"

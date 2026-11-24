@@ -1,0 +1,239 @@
+{
+  "info": {
+    "name": "AIG — проверка паттерна (глава 4)",
+    "description": "Ручная проверка сценариев ЛП и нарушителя через шлюз https://aig.local. В настройках Postman отключите проверку SSL-сертификата (сертификат самоподписанный).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Выпуск тестового JWT (HS256) из переменных коллекции jwt_secret и sub",
+          "function b64url(wordArray) {",
+          "  return CryptoJS.enc.Base64.stringify(wordArray).replace(/=+$/, '').replace(/\\+/g, '-').replace(/\\//g, '_');",
+          "}",
+          "const now = Math.floor(Date.now() / 1000);",
+          "const header = b64url(CryptoJS.enc.Utf8.parse(JSON.stringify({alg: 'HS256', typ: 'JWT'})));",
+          "const payload = b64url(CryptoJS.enc.Utf8.parse(JSON.stringify({",
+          "  sub: pm.collectionVariables.get('sub'), role: 'uploader', iat: now, exp: now + 3600})));",
+          "const sig = b64url(CryptoJS.HmacSHA256(header + '.' + payload, pm.collectionVariables.get('jwt_secret')));",
+          "pm.collectionVariables.set('token', header + '.' + payload + '.' + sig);"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://aig.local"
+    },
+    {
+      "key": "jwt_secret",
+      "value": "<значение JWT_SECRET из .env>"
+    },
+    {
+      "key": "sub",
+      "value": "contractor-postman-1"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "key",
+      "value": ""
+    },
+    {
+      "key": "upload_id",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "1. ЛП: новый диалект CSV (ожидается 202 adapted)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/ingest/supply_postman.csv",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "ingest",
+            "supply_postman.csv"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "date;well_id;volume_m3;approved\r\n2026-07-01;431;474,45;false\r\n2026-07-02;766;33,66;true\r\n"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('202 adapted', () => { pm.response.to.have.status(202); pm.expect(pm.response.json().status).to.eql('adapted'); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. С2: открыть multipart-сессию (повторить 6 раз)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/ingest-mpu/init/junk.csv",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "ingest-mpu",
+            "init",
+            "junk.csv"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const c = pm.response.code; console.log('init ->', c);",
+              "if (c === 200) { pm.collectionVariables.set('key', pm.response.json().key); pm.collectionVariables.set('upload_id', pm.response.json().upload_id); }",
+              "pm.test('200 (первые 3), затем 429, затем 403', () => pm.expect([200, 429, 403]).to.include(c));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. С2: загрузить часть с «мусором» и не завершать",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/ingest-mpu/part?key={{key}}&upload_id={{upload_id}}&n=1",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "ingest-mpu",
+            "part"
+          ],
+          "query": [
+            {
+              "key": "key",
+              "value": "{{key}}"
+            },
+            {
+              "key": "upload_id",
+              "value": "{{upload_id}}"
+            },
+            {
+              "key": "n",
+              "value": "1"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "garbage-part-0000000000"
+        }
+      }
+    },
+    {
+      "name": "4. Активное содержимое (ожидается 415)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/ingest/evil.csv",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "ingest",
+            "evil.csv"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "id,cmd\n1,<?php system($_GET[c]); ?>\n"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('415 rejected', () => pm.response.to.have.status(415));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Обход шлюза: S3 API напрямую (ожидается 404)",
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/minio/health/live",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "minio",
+            "health",
+            "live"
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404', () => pm.response.to.have.status(404));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+# Однократная инициализация ХБД: бакеты, версионирование, Lifecycle, IAM-политики
+apiVersion: batch/v1
+kind: Job
+metadata: {name: minio-init, namespace: aig}
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata: {labels: {app: minio-init}}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: aig-storage-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: init
+        image: aig/minio-init:1.0
+        imagePullPolicy: IfNotPresent
+        command: ["python", "app.py"]
+        env: [{name: MINIO_ENDPOINT, value: "storage:9000"}]
+        envFrom: [{secretRef: {name: aig-secrets}}]
+        resources:
+          requests: {cpu: 50m, memory: 64Mi}
+          limits: {cpu: 250m, memory: 128Mi}
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                          capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]

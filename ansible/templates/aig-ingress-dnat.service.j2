@@ -1,0 +1,18 @@
+# Публикация Ingress minikube на адресе ВМ3 {{ ansible_host }} правилами DNAT
+[Unit]
+Description=AIG: DNAT {{ aig_iface }}:443 -> Ingress minikube (IP клиента сохраняется)
+After=network-online.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=AIG_IFACE={{ aig_iface }}
+ExecStart=/usr/local/sbin/aig-ingress-dnat.sh
+ExecStop=/usr/local/sbin/aig-ingress-dnat.sh --delete
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

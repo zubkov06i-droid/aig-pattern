@@ -1,0 +1,7 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+boto3==1.35.90
+pyjwt==2.10.1
+prometheus-client==0.21.1
+minio==7.2.15

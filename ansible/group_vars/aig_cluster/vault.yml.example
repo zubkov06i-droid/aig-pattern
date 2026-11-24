@@ -1,0 +1,9 @@
+# Секреты паттерна. Скопируйте в vault.yml, задайте значения и зашифруйте:
+#   ansible-vault encrypt group_vars/aig_cluster/vault.yml
+vault_jwt_secret: change-me-32-bytes-minimum-random-string
+vault_minio_root_user: aig-admin
+vault_minio_root_password: change-me-admin-password
+vault_ingest_sa_secret: change-me-ingest-secret
+vault_security_sa_secret: change-me-security-secret
+vault_quarantine_sa_secret: change-me-quarantine-secret
+vault_adapter_sa_secret: change-me-adapter-secret

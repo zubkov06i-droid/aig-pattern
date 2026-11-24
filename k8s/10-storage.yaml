@@ -1,0 +1,55 @@
+# storage — ХБД MinIO (S3 API :9000, консоль :9001 закрыта NetworkPolicy)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: storage, namespace: aig, labels: {app: storage}}
+spec:
+  serviceName: storage
+  replicas: 1
+  selector: {matchLabels: {app: storage}}
+  template:
+    metadata:
+      labels: {app: storage, tier: data}
+      annotations: {prometheus.io/scrape: "true", prometheus.io/port: "9000",
+                    prometheus.io/path: /minio/v2/metrics/cluster}
+    spec:
+      serviceAccountName: aig-storage-sa
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000,
+                        seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: minio
+        image: docker.io/pgsty/silo:latest
+        args: ["server", "/data", "--console-address", ":9001",
+               "--certs-dir", "/tmp/certs"]
+        env:
+        - name: MINIO_ROOT_USER
+          valueFrom: {secretKeyRef: {name: aig-secrets, key: MINIO_ROOT_USER}}
+        - name: MINIO_ROOT_PASSWORD
+          valueFrom: {secretKeyRef: {name: aig-secrets, key: MINIO_ROOT_PASSWORD}}
+        - {name: MINIO_PROMETHEUS_AUTH_TYPE, value: public}
+        - {name: HOME, value: /tmp}
+        ports:
+        - {containerPort: 9000, name: s3}
+        - {containerPort: 9001, name: console}
+        readinessProbe:
+          httpGet: {path: /minio/health/ready, port: 9000}
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /minio/health/live, port: 9000}
+          initialDelaySeconds: 20
+          periodSeconds: 20
+        resources:
+          requests: {cpu: 250m, memory: 512Mi}
+          limits: {cpu: "1", memory: 1Gi}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: data, mountPath: /data}, {name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 10Gi}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: storage, namespace: aig}
+spec:
+  selector: {app: storage}
+  ports: [{name: s3, port: 9000}, {name: console, port: 9001}]

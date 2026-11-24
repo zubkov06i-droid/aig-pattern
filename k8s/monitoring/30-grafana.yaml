@@ -1,0 +1,47 @@
+# Grafana: дашборд метрик безопасности AIG (Prometheus) и журнала аудита (Loki).
+# Пароль администратора — в секрете grafana-admin (создаётся до применения манифестов).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grafana, namespace: aig-monitoring, labels: {app: grafana}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: grafana}}
+  template:
+    metadata: {labels: {app: grafana}}
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 472, fsGroup: 472,
+                        seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: grafana
+        image: grafana/grafana:11.3.1
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom: {secretKeyRef: {name: grafana-admin, key: admin-password}}
+        - {name: GF_USERS_ALLOW_SIGN_UP, value: "false"}
+        - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "false"}
+        - {name: GF_ANALYTICS_REPORTING_ENABLED, value: "false"}
+        - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+          value: /var/lib/grafana/dashboards/aig-security.json
+        ports: [{containerPort: 3000, name: http}]
+        readinessProbe: {httpGet: {path: /api/health, port: http}, periodSeconds: 10}
+        resources:
+          requests: {cpu: 50m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 384Mi}
+        securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/grafana}
+        - {name: datasources, mountPath: /etc/grafana/provisioning/datasources}
+        - {name: providers, mountPath: /etc/grafana/provisioning/dashboards}
+        - {name: dashboards, mountPath: /var/lib/grafana/dashboards}
+      volumes:
+      - {name: data, emptyDir: {}}
+      - {name: datasources, configMap: {name: grafana-datasources}}
+      - {name: providers, configMap: {name: grafana-dashboard-providers}}
+      - {name: dashboards, configMap: {name: grafana-dashboards}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: grafana, namespace: aig-monitoring}
+spec:
+  selector: {app: grafana}
+  ports: [{name: http, port: 3000, targetPort: http}]

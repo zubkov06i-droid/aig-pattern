@@ -1,0 +1,64 @@
+# ingest-api — оркестратор загрузки, без состояния, масштабируется HPA
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: ingest-api, namespace: aig, labels: {app: ingest-api}}
+spec:
+  replicas: 2
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  selector: {matchLabels: {app: ingest-api}}
+  template:
+    metadata:
+      labels: {app: ingest-api, tier: app}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: aig-ingest-sa
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, fsGroup: 10001,
+                        seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: ingest-api
+        image: aig/ingest:1.0
+        imagePullPolicy: IfNotPresent
+        ports: [{containerPort: 8001, name: http}]
+        envFrom: [{configMapRef: {name: aig-config}}]
+        env:
+        - {name: PORT, value: "8001"}
+        - {name: S3_ACCESS_KEY, value: aig-ingest-sa}
+        - name: S3_SECRET_KEY
+          valueFrom: {secretKeyRef: {name: aig-secrets, key: AIG_INGEST_SA_SECRET}}
+        readinessProbe:
+          httpGet: {path: /health, port: http}
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /health, port: http}
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}
+        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                          capabilities: {drop: [ALL]}}
+        volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: ingest-api, namespace: aig}
+spec:
+  selector: {app: ingest-api}
+  ports: [{name: http, port: 8001, targetPort: http}]
+---
+# HPA: 2–6 реплик, цель — 70 % загрузки CPU от запроса (нужен metrics-server)
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: {name: ingest-api, namespace: aig}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: ingest-api}
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+  - type: Resource
+    resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}

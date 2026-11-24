@@ -1,0 +1,32 @@
+# Пространство имён паттерна: Pod Security Admission уровня restricted
+# (запрет root, привилегий, hostPath), квота ресурсов и лимиты по умолчанию.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aig
+  labels:
+    app.kubernetes.io/part-of: aig-pattern
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata: {name: aig-quota, namespace: aig}
+spec:
+  hard:
+    requests.cpu: "3"
+    requests.memory: 3Gi
+    limits.cpu: "8"
+    limits.memory: 6Gi
+    pods: "25"
+    persistentvolumeclaims: "6"
+    requests.storage: 20Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata: {name: aig-defaults, namespace: aig}
+spec:
+  limits:
+  - type: Container
+    default:        {cpu: 500m, memory: 256Mi}
+    defaultRequest: {cpu: 50m,  memory: 64Mi}
